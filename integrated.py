@@ -383,3 +383,223 @@ def detect_community_cards(img_gray, rank_templates, suit_templates):
         results.append(card_name)
     
     return [c for c in results if c is not None]
+
+# ============================================================================
+# TURN DETECTION
+# ============================================================================
+
+def determine_turn():
+    """Match template for tilted cards - single scale"""
+    palo = cv2.imread("palo.png")
+
+    if palo is None:
+        raise Exception("palo.png not found")
+
+    palo_gray = cv2.cvtColor(palo, cv2.COLOR_BGR2GRAY)
+
+    sct = mss.mss()
+    frame = np.array(sct.grab(monitor))
+    src = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
+    src_gray = cv2.cvtColor(src, cv2.COLOR_BGR2GRAY)
+
+
+    x1, y1 = PALO_POS_START
+    x2, y2 = PALO_POS_END
+
+    template = palo_gray
+    
+    roi = src_gray[y1:y2, x1:x2]
+    w, h = x2 - x1, y2 - y1   # ROI width, height
+    
+    if w <= 0 or h <= 0:
+        return -1.0
+
+    tpl_h, tpl_w = template.shape
+
+    scale_w = (w - 1) / tpl_w
+    scale_h = (h - 1) / tpl_h
+    scale = min(scale_w, scale_h)
+
+    if scale <= 0:
+        return -1.0
+
+    new_w = max(5, int(tpl_w * scale))
+    new_h = max(5, int(tpl_h * scale))
+
+    resized_template = cv2.resize(template, (new_w, new_h))
+
+    tpl_blur = cv2.GaussianBlur(resized_template, (3, 3), 0)
+    roi_blur = cv2.GaussianBlur(roi, (3, 3), 0)
+
+    res = cv2.matchTemplate(roi_blur, tpl_blur, cv2.TM_CCOEFF_NORMED)
+    _, max_val, _, _ = cv2.minMaxLoc(res)
+
+    return max_val
+
+def make_move(recom):
+    if recom[0] == "FOLD":
+        x,y = FOLD
+        
+        absolute_x = second_monitor.x + x
+        absolute_y = second_monitor.y + y
+        pyautogui.click(absolute_x, absolute_y)
+    elif recom[0] == "CHECK" or recom[0] == "CALL":
+        x,y = CHECK
+        absolute_x = second_monitor.x + x
+        absolute_y = second_monitor.y + y
+
+        pyautogui.click(absolute_x, absolute_y)
+    else: # Raise
+        # per = 0.5
+        x, y = RAISE
+        absolute_x = second_monitor.x + x
+        absolute_y = second_monitor.y + y
+        pyautogui.click(absolute_x, absolute_y)
+
+        time.sleep(0.5)
+        
+        # Calculate the second click for the raise amount
+        raise_y = (1 - recom[1]) * (715 - 254) + 254  # Linear scaling of the raise amount
+        pyautogui.click(second_monitor.x+1540, raise_y)
+        time.sleep(0.5)
+        pyautogui.click(absolute_x, absolute_y)
+
+
+
+# ============================================================================
+# MAIN LOOP
+# ============================================================================
+
+print("Loading templates...")
+ranks_left, ranks_right, suits_left, suits_right = load_tilted_templates()
+comm_ranks, comm_suits = load_straight_templates()
+print("Templates loaded!\n")
+
+print("="*70)
+print("Samples: Once per second")
+print("Engine: OwnEngine.analyze_game_state()")
+print("Controls: 'q' = quit, 'd' = debug next sample")
+print("="*70 + "\n")
+
+last_sample_time = 0
+debug_next = False
+
+# Store last detected state for persistent display
+last_state = {
+    'card1': None,
+    'card2': None,
+    'community_cards': [],
+    'recommendation': 'Waiting...',
+    'card_boxes': []
+}
+
+cv2.namedWindow("Poker Bot")
+
+while True:
+    current_time = time.time()
+    
+    # Capture for display
+    screenshot = sct.grab(monitor)
+    img = np.array(screenshot)
+    img_bgr = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+    img_gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+    
+    display = img_bgr.copy()
+    
+    # Draw regions
+    cv2.rectangle(display, tuple(SELF_CARD1_RANK_START), tuple(SELF_CARD1_RANK_END), (255, 0, 0), 1)
+    cv2.rectangle(display, tuple(SELF_CARD2_RANK_START), tuple(SELF_CARD2_RANK_END), (255, 0, 0), 1)
+    cv2.rectangle(display, tuple(COMM_CARD_START_POSITION), tuple(COMM_CARD_END_POSITION), (0, 255, 0), 1)
+    cv2.rectangle(display, tuple(PALO_POS_START), tuple(PALO_POS_END), (0, 255, 0), 1)
+
+    # Sample and evaluate once per N second
+    if current_time - last_sample_time >= SAMPLE_INTERVAL or debug_next:
+        last_sample_time = current_time
+        
+        # Detect Turn
+        if(determine_turn() < 0.55):
+            print("Not our turn")
+            continue
+
+            
+
+
+
+        # Detect cards
+        card1, card2 = detect_self_cards(img_gray, ranks_left, ranks_right, suits_left, suits_right)
+        community_cards = detect_community_cards(img_gray, comm_ranks, comm_suits)
+        card_boxes = detect_card_rectangles(img_gray, COMM_CARD_START_POSITION, COMM_CARD_END_POSITION)
+        
+
+
+        # Prepare game state
+        game_state = {
+            'hole_cards': [card1, card2] if card1 and card2 else [],
+            'community_cards': community_cards,
+            'timestamp': time.strftime('%H:%M:%S')
+        }
+        
+        # Call your custom engine
+        try:
+            recommendation = analyze_game_state(game_state)
+        except Exception as e:
+            recommendation = f"Engine Error: {str(e)}"
+        
+        # Store state for persistent display
+        last_state['card1'] = card1
+        last_state['card2'] = card2
+        last_state['community_cards'] = community_cards
+        last_state['recommendation'] = recommendation
+        last_state['card_boxes'] = card_boxes
+        
+        # Display results
+        print(f"\n{'='*70}")
+        print(f"[{game_state['timestamp']}] GAME STATE")
+        print('='*70)
+        print(f"Hole Cards: {card1 or '??'} {card2 or '??'}")
+        print(f"Community:  {' '.join(community_cards) if community_cards else 'None'}")
+        print(f"\n>> ENGINE: {recommendation}")
+        print('='*70)
+        
+        if debug_next:
+            debug_next = False
+        
+        make_move(recommendation)
+    
+    # Always display last known state (persistent overlay)
+    info_y = 50
+    cv2.putText(display, f"Hole: {last_state['card1'] or '??'} {last_state['card2'] or '??'}", (20, info_y),
+               cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+    cv2.putText(display, f"Board: {' '.join(last_state['community_cards']) if last_state['community_cards'] else 'None'}", 
+               (20, info_y + 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+    cv2.putText(display, f"Move: {last_state['recommendation'][:50]}", (20, info_y + 70),
+               cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+    
+    # Display detected cards on their positions
+    if last_state['card1']:
+        cv2.putText(display, last_state['card1'], (SELF_CARD1_RANK_START[0], SELF_CARD1_RANK_START[1] - 10),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+    if last_state['card2']:
+        cv2.putText(display, last_state['card2'], (SELF_CARD2_RANK_START[0], SELF_CARD2_RANK_START[1] - 10),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+    
+    # Display community cards on their positions
+    for i, card_box in enumerate(last_state['card_boxes']):
+        if i < len(last_state['community_cards']) and last_state['community_cards'][i]:
+            box = card_box
+            cv2.rectangle(display, (box['x'], box['y']), 
+                         (box['x'] + box['w'], box['y'] + box['h']), (0, 255, 0), 2)
+            cv2.putText(display, last_state['community_cards'][i], (box['x'], box['y'] - 5),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+    
+    cv2.imshow("Poker Bot", display)
+    
+    key = cv2.waitKey(100)
+    if key == ord('q'):
+        break
+    elif key == ord('d'):
+        debug_next = True
+        print("\n[Debug: Forcing immediate sample...]")
+
+cv2.destroyAllWindows()
+print("\nPoker Bot stopped.")
